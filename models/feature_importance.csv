@@ -1,0 +1,11 @@
+feature,importance
+order_value,116
+address_completeness,100
+past_cod_rejections,90
+order_hour,72
+is_prepaid,49
+city_tier,41
+item_category,36
+is_weekend,13
+risky_address_cod,11
+high_value_cod,0

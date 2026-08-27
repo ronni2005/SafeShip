@@ -1,0 +1,3 @@
+model,precision,recall,f1,true_positive,false_positive,false_negative
+Logistic Regression (baseline),0.41358024691358025,0.7976190476190477,0.5447154471544715,134,190,34
+LightGBM (main model),0.4951923076923077,0.6130952380952381,0.5478723404255319,103,105,65

@@ -18,7 +18,7 @@ import numpy as np
 
 np.random.seed(42)  # reproducibility — same data every time we run this
 
-N = 2000
+N = 4000
 
 # ---------------------------------------------------------
 # STEP 1: Generate raw feature columns
@@ -48,6 +48,13 @@ item_category = np.random.choice(
     p=[0.30, 0.20, 0.15, 0.15, 0.10, 0.10]
 )
 
+# Address completeness score (0-100): landmark present, correct PIN, flat/house
+# number filled, etc. Lower score = courier struggles to find/deliver =
+# higher chance of failed delivery being logged as a "reject"
+address_completeness = np.clip(
+    np.round(np.random.normal(75, 18, size=N)), 20, 100
+)
+
 # Order hour (0-23) and weekend flag
 order_hour = np.random.randint(0, 24, size=N)
 is_weekend = np.random.choice([0, 1], size=N, p=[0.7, 0.3])
@@ -65,11 +72,11 @@ risk_score += np.where(city_tier == 2, 0.08, 0)
 risk_score += np.where(city_tier == 3, 0.14, 0)
 
 # Rule 3: Past rejections are the STRONGEST predictor — repeat behavior
-risk_score += past_cod_rejections * 0.09
+risk_score += past_cod_rejections * 0.12
 
 # Rule 4: High order value on COD = cold feet risk
-risk_score += np.where((order_value > 3000) & (is_prepaid == 0), 0.10, 0)
-risk_score += np.where((order_value > 7000) & (is_prepaid == 0), 0.08, 0)  # extra bump
+risk_score += np.where((order_value > 3000) & (is_prepaid == 0), 0.25, 0)
+risk_score += np.where((address_completeness < 50) & (is_prepaid == 0), 0.30, 0)  # extra bump
 
 # Rule 5: Category effect — fashion/electronics reject more (fit/quality doubts)
 category_risk = {
@@ -80,6 +87,11 @@ risk_score += pd.Series(item_category).map(category_risk).values
 
 # Rule 6: Late-night impulse orders (11PM-4AM) reject more often
 risk_score += np.where((order_hour >= 23) | (order_hour <= 4), 0.07, 0)
+
+# Rule 8: Poor address completeness = higher failed-delivery/reject risk
+# Score < 50 = "incomplete", strong risk bump; 50-75 = mild bump; 75+ = safe
+risk_score += np.where(address_completeness < 50, 0.15, 0)
+risk_score += np.where((address_completeness >= 50) & (address_completeness < 75), 0.05, 0)
 
 # Rule 7: Weekend orders slightly more impulsive
 risk_score += np.where(is_weekend == 1, 0.03, 0)
@@ -113,6 +125,7 @@ df = pd.DataFrame({
     "past_cod_rejections": past_cod_rejections,
     "order_value": order_value,
     "item_category": item_category,
+    "address_completeness": address_completeness,
     "order_hour": order_hour,
     "is_weekend": is_weekend,
     "rejected": rejected  # <-- this is our TARGET / label
