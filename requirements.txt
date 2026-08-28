@@ -6,3 +6,4 @@ fastapi
 uvicorn
 streamlit
 python-dotenv
+google-genai
