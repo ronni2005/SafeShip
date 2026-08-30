@@ -86,6 +86,7 @@ class PredictResponse(BaseModel):
     suggested_action: str
     needs_human_review: bool
     review_reason: str | None
+    top_features: list[list]  # [[feature_name, value], ...] — top 3 drivers of this order's score
 
 
 @app.get("/")
@@ -112,6 +113,7 @@ def predict(order: OrderRequest):
 
         result = explain_order(order_dict, risk_score, top_features)
         result["order_id"] = order.order_id
+        result["top_features"] = [[name, value] for name, value in top_features]
         return result
 
     except Exception as e:

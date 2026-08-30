@@ -69,7 +69,7 @@ risk_score = np.full(N, 0.05)  # base 5% reject chance for everyone
 
 # Rule 2: Higher city tier number (2/3) = higher reject risk
 risk_score += np.where(city_tier == 2, 0.08, 0)
-risk_score += np.where(city_tier == 3, 0.14, 0)
+risk_score += np.where(city_tier == 3, 0.10, 0)
 
 # Rule 3: Past rejections are the STRONGEST predictor — repeat behavior
 risk_score += past_cod_rejections * 0.12
