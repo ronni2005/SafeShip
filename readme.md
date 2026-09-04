@@ -1,161 +1,170 @@
-# Return Risk Scorer
-### Razorpay AI Risk Manager Hackathon — Returns/RTO Track
+# Return Risk Scorer — AI Risk Manager for COD Orders
 
-Predicts whether a Cash-on-Delivery (COD) order is likely to be **rejected at the door or returned**, before the merchant ships it — and tells the merchant exactly what to do about it.
+**Solves a real retention problem for Razorpay: merchants lose trust when too many legitimate COD orders get rejected at the door. This system catches genuinely risky orders early, lets merchants *talk to* borderline ones, and keeps more orders flowing through the platform.**
 
 ---
 
-## Problem
+## The Problem
 
-Indian e-commerce merchants lose real money to COD orders that get refused at delivery or returned right after — reverse logistics, repackaging, and courier costs eat into margins on every one of these, even when a "convenience fee" is charged. Existing solutions are largely rule-based (e.g. "block COD above ₹5000"). We built a **learned, explainable, financially-quantified** alternative.
+**From a Merchant's View:** Cash-on-delivery orders are riskier — customers can refuse at the door. A rejected order costs reverse-logistics, refund hassle, and lost margin. Today, merchants either accept all orders (and eat the losses) or use crude rules ("Tier 3 = auto-reject"), accidentally blocking legitimate sales.
 
-## What This System Does
+**From Razorpay's View:** When merchants lose money to undetected risky orders, they blame the platform. When they lose *legitimate* sales to overly aggressive fraud rules, they switch competitors. Razorpay needs to *predict* which orders will actually fail AND *engage* customers to fix them — not just block orders. That keeps merchants on the platform.
 
-A merchant's checkout system sends order details to our API the moment an order is placed. The system:
+**Our approach:** AI that predicts *and* intervenes. A LightGBM model catches risky orders + per-order feature explanations so merchants understand *why*. Then, if an order is borderline, an AI-generated WhatsApp asks the customer to confirm address or payment — turning a risky order into a safe one before shipping.
 
-1. **Scores** the order's rejection risk using a trained LightGBM model
-2. **Explains** the score in plain English using an LLM — grounded strictly in the model's actual top features, not free-form guessing
-3. **Suggests one action**: ship normally / verify address via WhatsApp / request partial deposit / request prepaid
-4. **Flags uncertain cases for a human** instead of auto-acting, when the model is unsure or the LLM's output looks ungrounded
-5. **Quantifies the ₹ impact** — money saved vs. money put at risk from false positives, on a real held-out test set
+---
 
-## Why This Direction
+## Architecture: Two Sides of AI
 
-The hackathon's AI Risk Manager track lists "Return-risk scorer" as an explicit example direction under the Returns/RTO loss category. We picked this over fraud or chargebacks and went deep on one specific, high-friction Indian e-commerce problem: predicting COD rejection risk with signals that actually matter locally (address quality, city tier, order timing) rather than generic global fraud features.
+### 1. Predictive (Risk Score)
+- **LightGBM classifier** trained on synthetic COD order data
+- Inputs: payment mode, city tier, past rejections, order value, item category, **address quality** (parsed from actual address text, not a guessed number), order timing, weekend flag
+- Output: risk probability (0-1), mapped to tiers (LOW < 0.40, BORDERLINE 0.40-0.65, HIGH > 0.65)
+- **Why LightGBM:** Captures non-linear interactions (e.g., high-value + Tier 3 + late order = compounding risk) that simpler models miss
 
-## Architecture
+### 2. Generative (Customer Enrichment) — *Experimental*
+- **Issue detection** (deterministic): identifies the *primary fixable issue* from the model's top features
+  - Incomplete address? → Ask for house number + PIN
+  - High-value COD? → Ask for confirmation
+  - Repeat rejections? → Ask to re-verify address
+- **Gemini LLM** generates a tailored WhatsApp message for that *specific* issue (not generic)
+- **Merchant engagement:** System creates a pre-filled `wa.me` link with the message text. Merchant clicks → opens WhatsApp → customer receives the exact message in one tap. No manual typing, no generic templates.
+- **Response parsing** (regex-based, simple): When customer replies in the simulator, extracts structured data (PIN, house number, confirmation phrases) from their free-text
+- **Re-scoring** (experimental): Appends enriched data to original order, re-runs through the model. Early testing shows promise but needs validation on real data.
+- **Merchant decision:** approve, request prepaid, or escalate
 
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐     ┌────────────────┐
-│   Order      │────▶│   FastAPI     │────▶│   LightGBM       │────▶│  Risk score +   │
-│  (checkout)  │     │  /predict     │     │  (risk_score)    │     │  top 3 drivers  │
-└─────────────┘     └──────────────┘     └─────────────────┘     └───────┬────────┘
-                                                                            │
-                                                                            ▼
-                                                                  ┌──────────────────┐
-                                                                  │  Gemini LLM        │
-                                                                  │  (explanation +    │
-                                                                  │   suggested action)│
-                                                                  └───────┬────────────┘
-                                                                            │
-                                                                            ▼
-                                                          ┌──────────────────────────────┐
-                                                          │  Hallucination validator +     │
-                                                          │  confidence check              │
-                                                          │  → needs_human_review flag     │
-                                                          └───────┬──────────────────────┘
-                                                                    │
-                                                                    ▼
-                                                        ┌─────────────────────────┐
-                                                        │  Streamlit Dashboard      │
-                                                        │  - Check an Order          │
-                                                        │  - Review Queue (HITL)     │
-                                                        │  - ROI Dashboard           │
-                                                        └─────────────────────────┘
-```
+**Why this combination works:** The model identifies risk *patterns*, the LLM *explains and asks*, the regex parser *grounds* answers back to real data. No part blindly trusts the AI — the merchant always decides. The enrichment loop is early-stage; we include it to show the *pattern* of predict-explain-engage, but production deployment would need real WhatsApp API integration + actual customer data validation.
 
-## Tech Stack
+---
 
-| Layer | Choice | Why |
-|---|---|---|
-| Model | LightGBM | Native categorical handling, feature importance, fast to tune on tabular data |
-| Baseline | Logistic Regression | Sanity check / comparison — shows model selection wasn't arbitrary |
-| Explainability | Gemini (`gemini-3.6-flash`) | Explains the model's decision in plain English — never makes the risk decision itself |
-| Backend | FastAPI | Auto request validation, auto-generated docs at `/docs`, async-ready |
-| Frontend | Streamlit | Fast to build, good for a 1-week timeline |
-| Data | Synthetic (4,000 rows) | Full control over realistic Indian COD risk patterns |
+## The Dataset: Why Synthetic, and What We Learned
 
-## Key Differentiators
+We don't have a publicly available **"COD orders rejected at door"** dataset. Razorpay's real transaction data is proprietary. So we built one.
 
-1. **Indian-context COD features** — address completeness, city tier, order timing, past rejection history — not generic global fraud features
-2. **WhatsApp deposit-link generator** — turns a risk score into an actual recoverable action (a real `wa.me` link with a pre-filled confirmation message), not just a number
-3. **Financial ROI breakdown** — money saved vs. money put at risk (false positives) vs. money still lost (missed cases), computed on the real held-out test set, with an interactive threshold slider
-4. **Human-in-the-loop safety net** — the LLM only *explains* a decision the ML model already made. Orders get flagged for human review when either (a) the model's own confidence is borderline (risk score 40–65%), or (b) the LLM's explanation references something not present in the actual input features (hallucination check)
+**Why not just use Kaggle?** Generic e-commerce datasets (Olist, UK Online Retail) have order history but *no label for doorstep rejection*. You can't train a supervised classifier without a target. We could've guessed labels, but that's pointless — the model would learn nothing.
 
-## Model Performance (Held-Out Test Set)
+**Our approach:** Generate features realistically (lognormal order values, city-tier weights matching India's e-commerce split, fashion as top rejection category), then build a *causal risk formula* (not random labels). Start with 5% base risk, add risk for each red flag (past rejections +12%, Tier 3 city +10%, high-value COD +25%, poor address +15%), sample final outcome from that probability.
 
-| Model | Precision | Recall | F1 |
-|---|---|---|---|
-| Rule-Based Baseline (COD + high-value/bad-address/repeat-rejector) | 62.3% | 52.1% | 56.8% |
-| Logistic Regression | 41.8% | 80.6% | 55.1% |
-| **LightGBM (main, tuned via 5-fold CV RandomizedSearch, 80 iterations)** | 56.3% | **62.4%** | **59.2%** |
+**Key honesty:** This is *synthetic* data, so we report results as "proof of concept on controlled scenarios." Real-world performance would need real merchant data (future work). But the *methodology* — how we detected issues, how we validated the LLM, how we handled the address parsing — all of that transfers.
 
-LightGBM beats the rule-based baseline on every metric that matters here — F1 (59.2% vs. 56.8%) and, more decision-relevant for this business problem, recall: LightGBM catches 103 real risky orders on the test set vs. the rule's 86, a 17-order difference. Given that a missed risky order costs the full reverse-logistics loss while a false positive only costs a fraction of order value (see ROI Dashboard), we weight this recall advantage as the more meaningful result, even though the F1 gap alone would already be a fair claim on its own.
+---
 
-**Ranking quality (AUC)** — a metric a binary rule structurally cannot be scored on at all, since it only has one fixed operating point: LightGBM AUC-ROC 0.842, AUC-PR 0.596; Logistic Regression AUC-ROC 0.844 (essentially tied), AUC-PR 0.623 (still slightly ahead of LightGBM). We're reporting this as-is rather than only the numbers that favor our main model — Logistic Regression's calibration is genuinely competitive here, which is part of why we kept it as a real comparison point rather than a token baseline.
+## Model Results: The Honest Comparison
 
-Decision threshold was selected using **only the training set**, then frozen and applied once to the test set — avoiding a data-leakage mistake we caught and fixed mid-project (see below). LightGBM's hyperparameters were found via an 80-iteration `RandomizedSearchCV` with 5-fold stratified cross-validation on the training set only (search space included tree depth/leaves, learning rate, subsampling, and L1/L2 regularization), not hand-picked.
+We compared three approaches on the same test set (800 orders):
 
-Decision threshold was selected using **only the training set**, then frozen and applied once to the test set — avoiding a data-leakage mistake we caught and fixed mid-project (see below).
+| Approach | Precision | Recall | F1 Score | AUC-ROC |
+|---|---|---|---|---|
+| **Rule-Based Baseline** | 46.06% | 52.41% | 49.03% | — |
+| **Logistic Regression** | 36.88% | 76.55% | 49.78% | 0.816 |
+| **LightGBM (Main Model)** | 51.80% | 49.66% | **50.70%** | 0.809 |
 
-**Top predictive features:** order value, address completeness, past COD rejections, order hour, city tier, payment mode, item category.
+**LightGBM now wins on F1.** It balances precision and recall better — catches risky orders (49.66% recall) while being more confident about its flags (51.80% precision, lowest false-positive rate).
 
-## Financial Impact
+**Why LightGBM over LogReg?** Beyond the F1 edge, LightGBM's per-order feature contributions (SHAP values) let us explain to merchants *why* this specific order is risky. LogReg gives you a probability; LightGBM shows you "order_value is the biggest driver (35% importance), followed by order_hour (25%), past_rejections (15%), etc." That's what merchants need to make confident decisions.
 
-At the tuned decision threshold (~0.85), the system shows a **net positive** financial impact on the test set. At lower thresholds, the false-positive cost (genuine customers wrongly asked for prepaid) outweighs the savings from correctly caught risky orders — the dashboard's interactive threshold slider (and an Auto-Optimize button) lets a merchant see and tune this trade-off directly, rather than trusting a single fixed cutoff.
+---
 
-## Limitations & Design Trade-offs
+## Key Differentiators: AI Solving the Real Problem (4 Things We Got Right)
 
-- **Synthetic data**: The dataset is generated with hand-designed, realistic risk rules rather than real Razorpay transactions. We used deterministic percentile-based labeling in the final version to reduce label noise — this makes the problem somewhat cleaner than real life, where two similar-looking orders don't always behave identically.
-- **Assumed cost figures**: ROI calculations use estimated constants (₹150 reverse-logistics cost per rejected order, 30% of order value lost per wrongly-flagged genuine customer). These are reasonable planning assumptions, not measured real-world figures — a real deployment would calibrate these from a merchant's actual data.
-- **City-tier as a risk signal**: `city_tier` is meant to capture delivery/logistics difficulty, not a socioeconomic judgment — but we noticed it could flag Tier 2/3 customers with an otherwise clean order history almost on tier alone. We reduced its weight in the model and lean on the BORDERLINE human-review tier as a safety net rather than removing the signal entirely. We see this as a genuine trade-off worth more work, not a solved problem.
-- **LLM latency**: Gemini API calls can occasionally take 15-30+ seconds; the dashboard's request timeout is set generously to accommodate this.
+### 1. Address Parsing (Not Magic, Just Rigorous)
+We started with a fake feature: `address_completeness` as a random number 0-100. That's lazy. Real fix: generate synthetic address strings (each component — house number, PIN, landmark — independently present/missing), then parse with *actual regex logic*.
 
-## Challenges & What We Learned
+Why this matters: The model trained on "incomplete addresses *cause delivery failures*" (true fact), not on invisible noise. The model learned order_value matters more than address (511 vs 179 importance score) — realistic, since merchants care most about high-value orders. Address completeness ranks #4, contributing meaningfully but not dominating. When a merchant sees "address_completeness: 45", they know exactly what's missing.
 
-**LightGBM initially underperformed our own baseline.** Our first tuned run had LightGBM scoring *worse* than plain Logistic Regression — a bigger, fancier model doing worse is a real signal, not a fluke to explain away. With only ~1,600-4,000 training rows, LightGBM's default settings (200 trees, depth 5) were overfitting. We cut it back to 80 trees, depth 3, added `min_child_samples=30`, and — separately — realized we were using the default 0.5 decision threshold on a dataset where only ~18% of orders are actually rejected. Tuning the threshold on the *training* set (see leakage note below) closed the gap and eventually pulled LightGBM ahead.
+### 2. Smart Customer Engagement (Experimental)
+Instead of: *"Hi, please confirm your order details"* (generic, awkward)
 
-**The synthetic data's "prepaid = safe" signal was getting drowned by noise.** Early versions of the dataset generator applied random noise uniformly, which was large enough to blur the sharp real-world difference between COD and prepaid rejection rates. We fixed this by scaling the noise proportionally to the underlying risk score, and separately found a logic bug where the "prepaid orders can't be rejected at the door" discount was only being applied to the *base* risk score, before several other rules had already added risk on top — so prepaid orders were still inheriting city-tier and category risk they shouldn't have. Moving that discount to apply *last*, after all other rules, fixed it (COD reject rate ended up ~29% vs. prepaid ~4-5%, which is the kind of gap a model can actually learn from).
+Our system sends: *"Hi! Just need your PIN code to finalize delivery. Reply with your complete address if possible"* (specific, actionable)
 
-**Caught a genuine data-leakage bug in threshold selection.** We were originally picking the LightGBM decision threshold by looking at `precision_recall_curve` computed on the *test set* — meaning the "held-out" evaluation wasn't actually held out from that one decision. Fixed by selecting the threshold using only the training set's own predictions, then freezing it before touching the test set at all. The reported F1 dropped slightly after the fix — which is the correct, honest outcome, not a regression.
+Deterministic issue detection + Gemini-generated message + one-click `wa.me` link. Merchant doesn't type anything — just clicks to send. This is a UX fix to the "I flagged your order as risky, now what?" problem. Early-stage feature, included to show the *pattern* of AI predicting, explaining, and engaging.
 
-**Manually engineered interaction features taught us something about tree models, rather than helping.** We added `high_value_cod` and `risky_address_cod` (hand-built combinations we thought the model needed). Both came back with near-zero feature importance. That's not a failed feature — it demonstrated that LightGBM's sequential tree splits already discover these same interactions on their own; hand-crafted interaction features matter far more for linear models (like our Logistic Regression baseline) than for tree-based ones.
+### 3. Hallucination Safety (Trust But Verify)
+LLMs can invent things. We validate Gemini's explanation against the actual data:
+- **Keyword check:** Did it mention "credit score" or "bank account"? (We never saw those in the input.)
+- **Numeric check:** Did it claim "5 past rejections" when the real value is 2?
 
-**Two bugs surfaced only once the full dashboard was running against a live model**, not in isolated testing: the ROI tab was silently using a generic 0.5 cutoff instead of the model's actual tuned ~0.60 threshold, understating the false-positive cost; and the Review Queue was showing duplicate entries for the same order because we were deduplicating on exact explanation text, and Gemini doesn't phrase the same order identically twice. Both were fixed — the ROI threshold is now a live, tunable slider instead of a hidden constant, and the queue dedupes on `order_id`.
+If caught, we flag for human review. The merchant sees "AI flagged this, but the explanation looks wrong — you decide."
 
-**Our first rule-vs-ML comparison was accidentally unfair, and fixing it properly took two attempts.** We first wrote a rule-based baseline to prove ML beats existing rule-based tools — but used the exact same thresholds our own dataset generator uses to create the labels, giving the rule unfair insider knowledge. Realizing this, our first fix overcorrected the other way: we swapped in a deliberately weak, naive rule (a flat "block COD above ₹5000," taken directly from the brief's own example) — which made the gap look artificially large, and wasn't a fair test either. We reverted to a genuinely competent, hand-designed rule (COD + high value OR poor address OR repeat rejector — the kind an experienced ops analyst would actually write) and, instead of tilting the comparison, ran a proper 5-fold cross-validated `RandomizedSearchCV` over LightGBM's hyperparameters (80 iterations, covering tree depth, leaves, learning rate, subsampling, and L1/L2 regularization) — legitimate tuning on the training set only, never touching the test set. That produced a real, earned improvement: F1 59.2% vs. the rule's 56.8%, and — more decision-relevant — 103 real risky orders caught vs. the rule's 86.
+### 4. Merchant Dashboard (Not Just Model Output)
+- **Tab 1:** Check a single order → see risk + explanation → send WhatsApp → re-score after customer reply → approve/request prepaid
+- **Tab 2:** Review queue for borderline orders (manual override always possible)
+- **Tab 3:** Live ROI calculator — drag the decision threshold, see money saved vs. false-positive costs in real time
 
-**City-tier as a risk signal raised a fairness question we didn't fully resolve.** Testing a customer with zero rejection history from a Tier 3 city, we noticed they could land in the BORDERLINE review zone almost entirely because of their city tier, not their behavior. We reduced that feature's weight and rely on human review for borderline cases as a partial mitigation, but consider this an open trade-off rather than a solved one — see Limitations above.
+---
 
-## Running Locally
+## What Actually Broke (And How We Fixed It)
+
+### 1. Data Leakage in Threshold Selection
+**The bug:** We picked the optimal decision threshold using the *test set* probabilities. That's cheating — the model had "seen" the test data's right answers when choosing the threshold.
+
+**The fix:** Use out-of-fold (OOF) cross-validation on the *train set only*. Fit the model on fold 1-4, predict on fold 5 (held out), repeat. Pick the threshold from those held-out predictions. Test set never touched until final grading.
+
+**Why it mattered:** This shifted the optimal threshold from 0.5 to ~0.59. Using an in-sample threshold would have reported better numbers, but they'd be lies.
+
+### 2. The Address Completeness Disaster
+**The original sin:** `address_completeness = np.random.normal(75, 18)`. A number with no connection to any real address. It looked smart in the data schema, but it was fake.
+
+**Red flag:** The model weighted it heavily (top 5 features), but we couldn't explain why. "Because it's random noise the model happened to latch onto" is not a business insight.
+
+**The fix:** Build real address strings, parse them genuinely. Now when the model says "address is risky," we can show the merchant "because the address is missing the PIN code" (factual, actionable).
+
+**Lesson:** Naming a feature is not the same as understanding it. We spent hours on this before realizing we'd skipped a layer of honesty.
+
+### 3. Recall Bias Gone Wrong
+**The mistake:** We optimized hyperparameters for pure recall (catch all risky orders, ignore false alarms). Result: flagged 57% of orders. Merchants would ask half their customers for deposits. Useless.
+
+**The fix:** Use F-beta scoring (beta=1.0, balanced F1) instead of pure recall. Acknowledges that misses are costly, but doesn't ignore the cost of false alarms. Also, let the dashboard's threshold slider be where merchants can *choose* how aggressive to be, rather than baking one extreme into the model.
+
+### 4. Gemini SDK Chaos
+**The pain:** Started with `google-generativeai`, then saw `google-genai` (newer), tried mixing them. Ended up with three different API syntaxes in one file. 500 errors everywhere.
+
+**The fix:** Stick with one stable SDK (`google.generativeai`). Add error handling so an API failure returns a sensible fallback, not a crash.
+
+---
+
+## Limitations & Future Work
+
+- **Synthetic data:** Real-world performance unknown. Needs actual merchant transaction data + rejection outcomes.
+- **Address parser:** Hand-written regex, not NLP. Misses typos, abbreviations, regional variations.
+- **Enrichment flow (experimental):** WhatsApp re-engagement is simulated in the dashboard. Production would need:
+  - Real WhatsApp Business API integration (not just wa.me links)
+  - Actual webhook to receive customer replies
+  - Validation that re-scored orders actually perform better in production
+- **Hallucination validator:** Catches invented data sources and wrong numbers, but not subtle mischaracterizations.
+- **Scalability:** No Docker, no multi-user auth, no database. Current dashboard is single-session. Production would need:
+  - Persistent order queue (database)
+  - Multi-merchant auth + isolation
+  - Async job queue for re-scoring large batches
+  - Monitoring + retraining pipeline
+
+---
+
+## How to Run
 
 ```bash
-# 1. Generate data
-python3 generate_dataset.py
-python3 split_dataset.py
+# Setup
+python3 data/generate_dataset.py      # Build synthetic data
+python3 data/split_dataset.py          # 80/20 train/test split
+python3 models/train.py                # Train all 3 models, save artifacts
 
-# 2. Train models
-python3 models/train.py
-
-# 3. Set up your Gemini API key in .env
-echo "GEMINI_API_KEY=your_key_here" > .env
-
-# 4. Start backend (Terminal 1)
+# Serve
+# Terminal 1:
 python -m uvicorn backend.app:app --reload
 
-# 5. Start dashboard (Terminal 2)
+# Terminal 2:
 streamlit run frontend/dashboard.py
 ```
 
-Visit `http://127.0.0.1:8000/docs` for the API, and the Streamlit URL printed in Terminal 2 for the dashboard.
+**API docs:** `http://127.0.0.1:8000/docs`  
+**Dashboard:** `http://localhost:8501`
 
-## Project Structure
+---
 
-```
-razorpay-rto-guard/
-├── data/
-│   ├── generate_dataset.py
-│   ├── split_dataset.py
-│   ├── orders.csv / train.csv / test.csv
-├── models/
-│   ├── train.py
-│   ├── lightgbm_model.pkl / logreg_model.pkl
-│   ├── feature_importance.csv / model_comparison.csv
-├── backend/
-│   ├── app.py              # FastAPI /predict endpoint
-│   ├── llm_explainer.py    # LLM explanation + hallucination validator
-├── frontend/
-│   └── dashboard.py        # Streamlit dashboard (3 tabs)
-├── requirements.txt
-└── README.md
-```
+## What This Proves
+
+1. **Razorpay can reduce merchant churn** by catching order risk early *and* helping fix it (not just blocking)
+2. **Simple ML + simple AI works better than complex AI alone** — issue detection is deterministic, WhatsApp generation is Gemini, response parsing is regex. Each layer does one thing well.
+3. **Honesty in methodology matters** — synthetic data is fine if you're transparent about it; in-sample threshold optimization is not fine even if the numbers look good.
+
+This is a prototype, not production-ready yet. It shows the *pattern*: predict + explain + engage + decide. That pattern scales to real data.

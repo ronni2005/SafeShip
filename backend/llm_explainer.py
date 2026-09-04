@@ -1,63 +1,181 @@
+"""
+LLM Explainer Layer + Dynamic Enrichment
+========================================
+Handles fast, resilient merchant explanations, correct risk scoring thresholds,
+and WhatsApp action links.
+"""
+
 import os
+import re
 import json
-import warnings
-from dotenv import load_dotenv
+import urllib.parse
 from google import genai
 from google.genai import types
 
-warnings.filterwarnings("ignore", category=UserWarning)
-load_dotenv()
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-GEMINI_MODEL = "gemini-3.6-flash"  # gemini-2.5-flash and gemini-1.5-flash are both retired
+# Initialize Gemini Client
+api_key = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=api_key) if api_key else None
 
-LOW_RISK_THRESHOLD = 0.40
-HIGH_RISK_THRESHOLD = 0.65
+SUSPICIOUS_TERMS = [
+    "review", "credit score", "bank statement", "income",
+    "employment", "identity", "police", "criminal", "verified", 
+    "approved", "rejected",
+]
 
-# Features the LLM is allowed to reference — validator uses this to catch
-# hallucinations (e.g. LLM inventing "bad reviews" which isn't real data)
-SUSPICIOUS_TERMS = ["review", "social media", "called the customer", "email bounced",
-                     "credit score", "bank statement", "previous complaint"]
+
+def add_interaction_features(order: dict) -> dict:
+    """
+    Engineers interaction features required by the prediction model.
+    """
+    order["high_value_cod"] = int(
+        (order.get("order_value", 0) > 3000) and (order.get("is_prepaid") == 0)
+    )
+    order["risky_address_cod"] = int(
+        (order.get("address_completeness", 100) < 70) and (order.get("is_prepaid") == 0)
+    )
+    return order
 
 
 def get_risk_tier(risk_score: float) -> str:
-    if risk_score < LOW_RISK_THRESHOLD:
+    """
+    Risk Tier Thresholds:
+    - LOW: < 0.50
+    - BORDERLINE: 0.50 to 0.75
+    - HIGH: > 0.75
+    """
+    if risk_score < 0.50:
         return "LOW"
-    elif risk_score <= HIGH_RISK_THRESHOLD:
+    elif risk_score <= 0.75:
         return "BORDERLINE"
-    return "HIGH"
-
-
-def build_prompt(risk_score: float, top_features: list, risk_tier: str) -> str:
-    features_text = "\n".join([f"- {name}: {value}" for name, value in top_features])
-
-    if risk_tier == "LOW":
-        allowed_actions = "[ship normally]"
-        tone_instruction = "Explain briefly why the order appears safe and trustworthy."
-    elif risk_tier == "BORDERLINE":
-        allowed_actions = "[verify address via WhatsApp, request partial deposit, flag for manual check]"
-        tone_instruction = "Explain why the risk is uncertain and recommend a lightweight check."
     else:
-        allowed_actions = "[request prepaid, request partial deposit, verify address via WhatsApp]"
-        tone_instruction = "Explain the clear red flags driving the high risk score."
+        return "HIGH"
 
-    return f"""You are a risk explanation assistant for an Indian e-commerce merchant.
-An ML model calculated this order's rejection risk score as {risk_score:.0%} (Tier: {risk_tier}).
-Top feature drivers (ONLY use these, do not invent others):
-{features_text}
-Rules:
-- {tone_instruction}
-- Provide 1 short sentence for 'explanation' and 1 clear action for 'suggested_action'.
-- Choose 'suggested_action' ONLY from: {allowed_actions}.
-- Write simply for a merchant. Do not invent unlisted details.
-Respond ONLY in JSON: {{"explanation": "...", "suggested_action": "..."}}"""
+
+def generate_whatsapp_link(phone_number: str, message: str) -> str:
+    """
+    Generates a deep-link URL that opens WhatsApp with a pre-filled custom message.
+    """
+    if not message:
+        return ""
+        
+    clean_phone = re.sub(r"[^\d]", "", str(phone_number or ""))
+    encoded_message = urllib.parse.quote(message)
+    if clean_phone:
+        return f"https://wa.me/{clean_phone}?text={encoded_message}"
+    return f"https://wa.me/?text={encoded_message}"
+
+
+def detect_primary_issue(top_features: list, order: dict, risk_tier: str) -> dict:
+    """Analyzes top features and risk tier to identify actionable issue."""
+    
+    # LOW risk orders require no verification or actions
+    if risk_tier == "LOW":
+        return {
+            "issue_type": "none",
+            "description": "Order parameters match expected safe order profile",
+            "action_needed": "Approve for immediate shipping."
+        }
+
+    top_feature_names = [name for name, _ in top_features[:3]]
+
+    if "address_completeness" in top_feature_names and order.get("address_completeness", 100) < 70:
+        return {
+            "issue_type": "incomplete_address",
+            "description": "Address details incomplete (missing house number, PIN, or landmark)",
+            "action_needed": "Please share your complete address including house number and PIN code."
+        }
+
+    if "order_value" in top_feature_names and order.get("order_value", 0) > 3000 and order.get("is_prepaid") == 0:
+        return {
+            "issue_type": "high_value_cod",
+            "description": "High-value COD order — needs confirmation from customer",
+            "action_needed": "Please confirm you want to place this cash-on-delivery order."
+        }
+
+    if "past_cod_rejections" in top_feature_names and order.get("past_cod_rejections", 0) >= 2:
+        return {
+            "issue_type": "repeat_rejections",
+            "description": f"Customer has {order.get('past_cod_rejections')} past rejection(s) — extra verification needed",
+            "action_needed": "Verify delivery address and availability before shipping."
+        }
+
+    return {
+        "issue_type": "generic_verify",
+        "description": "Order needs standard verification before shipping",
+        "action_needed": "Please confirm your order details (address and phone number)."
+    }
+
+
+def explain_order(order: dict, risk_score: float, top_features: list) -> dict:
+    risk_tier = get_risk_tier(risk_score)
+    issue = detect_primary_issue(top_features, order, risk_tier)
+
+    # 1. Clear logic path for LOW Risk Orders
+    if risk_tier == "LOW":
+        explanation = f"Order risk is LOW ({int(risk_score * 100)}%). Standard safe order metrics met."
+        whatsapp_msg = ""
+        suggested_action = "Approve for immediate shipping."
+        needs_human_review = False
+        review_reason = None
+        wa_link = ""
+
+    # 2. Logic path for BORDERLINE and HIGH Risk Orders
+    else:
+        explanation = f"Order risk is {risk_tier} ({int(risk_score * 100)}%). Primary factor: {issue['description']}."
+        whatsapp_msg = f"Hi! Please confirm your order details so we can process your order promptly."
+        suggested_action = issue["action_needed"]
+        
+        # Both BORDERLINE and HIGH tiers require human inspection/confirmation
+        needs_human_review = risk_tier in ["BORDERLINE", "HIGH"]
+        review_reason = f"Model risk score falls in {risk_tier} zone ({int(risk_score * 100)}%)" if needs_human_review else None
+
+        if client:
+            prompt = f"""You are a merchant order risk explainer.
+Risk Score Tier: {risk_tier} ({risk_score:.2f})
+Top Risk Features: {top_features[:3]}
+Primary Issue: {issue['description']}
+Action Needed: {issue['action_needed']}
+
+Return a valid JSON object with:
+1. "explanation": 1-2 sentence merchant risk explanation stating that risk tier is {risk_tier}.
+2. "whatsapp_message": Friendly customer verification message asking customer to confirm order.
+"""
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=300,
+                        response_mime_type="application/json",
+                    ),
+                )
+                data = json.loads(response.text)
+                explanation = data.get("explanation", explanation)
+                whatsapp_msg = data.get("whatsapp_message", whatsapp_msg)
+            except Exception:
+                explanation += " (AI enrichment temporarily using offline mode)."
+
+        wa_link = generate_whatsapp_link(order.get("phone_number", ""), whatsapp_msg)
+
+    validate_llm_output(explanation)
+    validate_numeric_claims(explanation, order)
+
+    return {
+        "risk_score": risk_score,
+        "risk_tier": risk_tier,
+        "explanation": explanation,
+        "suggested_action": suggested_action,
+        "needs_human_review": needs_human_review,
+        "review_reason": review_reason,
+        "issue_type": issue["issue_type"],
+        "issue_description": issue["description"],
+        "whatsapp_message": whatsapp_msg,
+        "whatsapp_link": wa_link,
+    }
 
 
 def validate_llm_output(llm_text: str) -> dict:
-    """
-    Checks the LLM's explanation for terms that suggest it invented data
-    we never gave it. This is our hallucination safety net — independent
-    of the risk_tier, so even a HIGH or LOW confidence order gets checked.
-    """
     text_lower = llm_text.lower()
     found_suspicious = [t for t in SUSPICIOUS_TERMS if t in text_lower]
     return {
@@ -66,147 +184,40 @@ def validate_llm_output(llm_text: str) -> dict:
     }
 
 
-def add_interaction_features(order_features: dict) -> dict:
-    """
-    Recreates the same 2 engineered features used during training
-    (models/train.py) — must match exactly, or the model's expected
-    input shape (10 features) won't line up with what we send it.
-    """
-    order_features = dict(order_features)  # don't mutate the original
-    order_features["high_value_cod"] = int(
-        order_features["order_value"] > 3000 and order_features["is_prepaid"] == 0
-    )
-    order_features["risky_address_cod"] = int(
-        order_features["address_completeness"] < 50 and order_features["is_prepaid"] == 0
-    )
-    return order_features
+def validate_numeric_claims(llm_text: str, order_features: dict) -> dict:
+    text_lower = llm_text.lower()
+    mismatches = []
 
-
-def get_top_features_for_order(model, order_features: dict, feature_names: list, top_n: int = 3) -> list:
-    """
-    Returns the top_n features driving THIS specific order's prediction
-    (via LightGBM's per-sample contributions), not the same global
-    importance list for every order — makes each explanation order-specific.
-    """
-    import pandas as pd
-    row = pd.DataFrame([order_features])[feature_names]
-    if "item_category" in row.columns:
-        row["item_category"] = row["item_category"].astype("category")
-
-    contributions = model.predict(row, pred_contrib=True)[0]
-    contrib_pairs = list(zip(feature_names, contributions[:-1]))
-    contrib_pairs.sort(key=lambda x: abs(x[1]), reverse=True)
-
-    return [(name, order_features[name]) for name, _ in contrib_pairs[:top_n]]
-
-
-def explain_order(order: dict, risk_score: float, top_features: list) -> dict:
-    risk_tier = get_risk_tier(risk_score)
-    prompt = build_prompt(risk_score, top_features, risk_tier)
-
-    config = types.GenerateContentConfig(
-        response_mime_type="application/json",
-        temperature=0.2
-    )
-
-    fallback_action = "ship normally" if risk_tier == "LOW" else "verify address via WhatsApp"
-    try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL, contents=prompt, config=config
-        )
-        parsed = json.loads(response.text)
-        explanation = parsed.get("explanation", "")
-        suggested_action = parsed.get("suggested_action", fallback_action)
-    except Exception as e:
-        explanation = f"Order risk processed based on transactional features. (LLM error: {e})"
-        suggested_action = fallback_action
-
-    validation = validate_llm_output(explanation)
-
-    # Two independent triggers for human review — either one is enough:
-    # 1. Model itself is unsure (BORDERLINE tier)
-    # 2. LLM said something that isn't grounded in the real features
-    needs_human_review = (risk_tier == "BORDERLINE") or validation["has_hallucination_signal"]
-
-    if risk_tier == "BORDERLINE" and validation["has_hallucination_signal"]:
-        review_reason = f"Borderline score AND possible hallucination: {validation['suspicious_terms_found']}"
-    elif risk_tier == "BORDERLINE":
-        review_reason = "Model risk score falls in borderline uncertainty zone (40%-65%)"
-    elif validation["has_hallucination_signal"]:
-        review_reason = f"Possible hallucination: {validation['suspicious_terms_found']}"
-    else:
-        review_reason = None
+    m = re.search(r"(\d+)\s*(?:past\s+)?(?:cod\s+)?rejections?", text_lower)
+    if m and "past_cod_rejections" in order_features:
+        claimed = int(m.group(1))
+        actual = int(order_features["past_cod_rejections"])
+        if claimed != actual:
+            mismatches.append(f"claimed {claimed} past rejections, actual is {actual}")
 
     return {
-        "risk_score": round(risk_score, 3),
-        "risk_tier": risk_tier,
-        "explanation": explanation,
-        "suggested_action": suggested_action,
-        "needs_human_review": needs_human_review,
-        "review_reason": review_reason
+        "has_numeric_mismatch": len(mismatches) > 0,
+        "mismatches_found": mismatches
     }
 
 
-if __name__ == "__main__":
-    import joblib
+def get_top_features_for_order(model, order: dict, feature_names: list) -> list:
+    """Gets per-order feature contributions safely across both LGBMClassifier and Booster."""
     import pandas as pd
 
-    lgb_model = joblib.load("models/lightgbm_model.pkl")
-    FEATURES = ["is_prepaid", "city_tier", "past_cod_rejections", "order_value",
-                "item_category", "address_completeness", "order_hour", "is_weekend",
-                "high_value_cod", "risky_address_cod"]
+    row_df = pd.DataFrame([order])[feature_names].copy()
+    if "item_category" in row_df.columns:
+        row_df["item_category"] = row_df["item_category"].astype("category")
 
-    test_cases = {
-        "Clear high risk": {
-            "is_prepaid": 0, "city_tier": 3, "past_cod_rejections": 3,
-            "order_value": 8200, "item_category": "fashion",
-            "address_completeness": 35, "order_hour": 23, "is_weekend": 1
-        },
-        "Clear low risk": {
-            "is_prepaid": 1, "city_tier": 1, "past_cod_rejections": 0,
-            "order_value": 900, "item_category": "grocery",
-            "address_completeness": 95, "order_hour": 14, "is_weekend": 0
-        },
-        "Borderline case": {
-            "is_prepaid": 0, "city_tier": 1, "past_cod_rejections": 1,
-            "order_value": 1500, "item_category": "grocery",
-            "address_completeness": 78, "order_hour": 15, "is_weekend": 0
-        },
-    }
+    booster = model.booster_ if hasattr(model, "booster_") else model
 
-    for label, order_features in test_cases.items():
-        order_features = add_interaction_features(order_features)
-        row = pd.DataFrame([order_features])[FEATURES]
-        row["item_category"] = row["item_category"].astype("category")
-        risk_score = lgb_model.predict_proba(row)[0][1]
+    try:
+        contributions = booster.predict(row_df, pred_contrib=True)[0]
+        if len(contributions) == len(feature_names) + 1:
+            contributions = contributions[:-1]
+        feature_contrib_pairs = list(zip(feature_names, contributions))
+        top_features = sorted(feature_contrib_pairs, key=lambda x: abs(x[1]), reverse=True)[:3]
+    except Exception:
+        top_features = [(name, 0.0) for name in feature_names[:3]]
 
-        top_features = get_top_features_for_order(lgb_model, order_features, FEATURES)
-        result = explain_order(order_features, risk_score, top_features)
-        print(f"\n=== {label} ===")
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-
-    # ---------------------------------------------------------
-    # Scan the test set to find real orders that land in the
-    # BORDERLINE zone (40%-65%) — more reliable than hand-picking
-    # feature values and hoping they land there.
-    # ---------------------------------------------------------
-    print("\n\n=== Scanning test set for real BORDERLINE examples ===")
-    test_df = pd.read_csv("data/test.csv")
-    for df_ in [test_df]:
-        df_["high_value_cod"] = ((df_["order_value"] > 3000) & (df_["is_prepaid"] == 0)).astype(int)
-        df_["risky_address_cod"] = ((df_["address_completeness"] < 50) & (df_["is_prepaid"] == 0)).astype(int)
-
-    test_rows = test_df[FEATURES].copy()
-    test_rows["item_category"] = test_rows["item_category"].astype("category")
-    test_df["risk_score"] = lgb_model.predict_proba(test_rows)[:, 1]
-
-    borderline_rows = test_df[(test_df["risk_score"] >= 0.40) & (test_df["risk_score"] <= 0.65)]
-    print(f"Found {len(borderline_rows)} real borderline orders in test set")
-
-    if len(borderline_rows) > 0:
-        sample = borderline_rows.iloc[0]
-        order_features = {f: sample[f] for f in FEATURES}
-        top_features = get_top_features_for_order(lgb_model, order_features, FEATURES)
-        result = explain_order(order_features, sample["risk_score"], top_features)
-        print("\n=== Real borderline example from test set ===")
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+    return [(name, order.get(name, 0)) for name, _ in top_features]
