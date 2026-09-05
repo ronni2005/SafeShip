@@ -94,7 +94,7 @@ If caught, we flag for human review. The merchant sees "AI flagged this, but the
 
 ---
 
-## What Actually Broke (And How We Fixed It)
+## Problems Mid Way and Fixes
 
 ### 1. Data Leakage in Threshold Selection
 **The bug:** We picked the optimal decision threshold using the *test set* probabilities. That's cheating — the model had "seen" the test data's right answers when choosing the threshold.
