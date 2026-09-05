@@ -18,7 +18,7 @@ tab1, tab2, tab3 = st.tabs(["🔍 Check an Order", "⚠️ Review Queue", "💰 
 if "review_queue" not in st.session_state:
     st.session_state.review_queue = []
 
-# Helper function for unified risk colors & icons
+
 def get_tier_badge(risk_tier: str):
     if risk_tier == "LOW":
         return "green", "🟢 LOW"
@@ -27,9 +27,8 @@ def get_tier_badge(risk_tier: str):
     else:
         return "red", "🔴 HIGH"
 
-# ============================================================================
-# TAB 1: Check an Order (including enrichment flow)
-# ============================================================================
+# TAB 1: Check an Order
+
 with tab1:
     st.subheader("Enter Order Details")
 
@@ -224,9 +223,8 @@ with tab1:
             if st.button("✅ Order is Safe — Approve for Shipping", key="low_risk_approve"):
                 st.success(f"✅ Order {order_id} approved for immediate shipping!")
 
-# ============================================================================
 # TAB 2: Review Queue
-# ============================================================================
+
 with tab2:
     st.subheader("Orders Needing Human Review")
     st.markdown("*System flagged these as low-confidence or borderline risk — a human decides, the AI doesn't auto-act.*")
@@ -262,9 +260,8 @@ with tab2:
                         st.warning("Order blocked — request prepaid or cancel")
                         st.session_state.review_queue[i]["status"] = "blocked"
 
-# ============================================================================
 # TAB 3: ROI Dashboard
-# ============================================================================
+
 with tab3:
     st.subheader("Financial Impact Analysis")
     st.markdown("*See the money saved by catching risky orders early, vs. the cost of false alarms.*")

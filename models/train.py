@@ -56,7 +56,7 @@ def evaluate_ranking(name, y_true, y_scores):
     return auc_roc, auc_pr
 
 
-# MODEL 1: Logistic Regression (UNTOUCHED)
+# MODEL 1: Logistic Regression 
 preprocessor = ColumnTransformer([
     ("num", StandardScaler(), NUMERIC),
     ("cat", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL)
@@ -71,7 +71,7 @@ logreg_pipeline.fit(X_train, y_train)
 logreg_preds = logreg_pipeline.predict(X_test)
 logreg_results = evaluate("Logistic Regression (baseline)", y_test, logreg_preds)
 
-# MODEL 0: Rule-Based Baseline (UNTOUCHED)
+# MODEL 0: Rule-Based Baseline
 def rule_based_predict(df):
     return (
         (df["is_prepaid"] == 0) &
@@ -81,9 +81,7 @@ def rule_based_predict(df):
 rule_preds = rule_based_predict(test_df)
 rule_results = evaluate("Rule-Based Baseline (COD + high-value/bad-address/repeat-rejector)", y_test, rule_preds)
 
-# ==============================================================================
 # MODEL 2: LightGBM (OPTIMIZED FOR HIGH RECALL & F1)
-# ==============================================================================
 X_train_lgb = X_train.copy()
 X_test_lgb = X_test.copy()
 X_train_lgb["item_category"] = X_train_lgb["item_category"].astype("category")
@@ -117,8 +115,7 @@ lgb_model = search.best_estimator_
 print(f"\nBest CV F1 (5-fold, train set only): {search.best_score_:.2%}")
 print(f"Best hyperparameters: {search.best_params_}")
 
-# OPTIMIZATION: Use Out-Of-Fold (OOF) CV predictions to select threshold
-# Prevents training set threshold leakage & artificially high cutoff values
+# OPTIMIZATION: Use Out-Of-Fold (OOF) CV predictions to select threshold--Prevents training set threshold leakage & artificially high cutoff values
 oof_probs = cross_val_predict(
     lgb_model, X_train_lgb, y_train, cv=cv, method="predict_proba"
 )[:, 1]

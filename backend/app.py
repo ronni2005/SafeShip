@@ -1,7 +1,5 @@
 """
 FastAPI Backend — Return Risk Scorer
-======================================
-Exposes POST /predict endpoint to evaluate COD order risk and suggested actions.
 """
 
 import sys

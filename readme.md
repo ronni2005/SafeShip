@@ -1,6 +1,7 @@
 # Return Risk Scorer — AI Risk Manager for COD Orders
 
-**Solves a real retention problem for Razorpay: merchants lose trust when too many legitimate COD orders get rejected at the door. This system catches genuinely risky orders early, lets merchants *talk to* borderline ones, and keeps more orders flowing through the platform.**
+**Solves a real retention problem for financial solutions provider companies for efficient two-way payment transactions.
+The Core Issue: merchants lose trust when too many legitimate COD orders get rejected at the door. This system catches genuinely risky orders early, lets merchants *talk to* borderline ones, and keeps more orders flowing through the platform.**
 
 ---
 
@@ -8,9 +9,9 @@
 
 **From a Merchant's View:** Cash-on-delivery orders are riskier — customers can refuse at the door. A rejected order costs reverse-logistics, refund hassle, and lost margin. Today, merchants either accept all orders (and eat the losses) or use crude rules ("Tier 3 = auto-reject"), accidentally blocking legitimate sales.
 
-**From Razorpay's View:** When merchants lose money to undetected risky orders, they blame the platform. When they lose *legitimate* sales to overly aggressive fraud rules, they switch competitors. Razorpay needs to *predict* which orders will actually fail AND *engage* customers to fix them — not just block orders. That keeps merchants on the platform.
+**From Companies View:** When merchants lose money to undetected risky orders, they blame the platform. When they lose *legitimate* sales to overly aggressive fraud rules, they switch competitors. Companies needs to *predict* which orders will actually fail AND *engage* customers to fix them — not just block orders. That keeps merchants on the platform.
 
-**Our approach:** AI that predicts *and* intervenes. A LightGBM model catches risky orders + per-order feature explanations so merchants understand *why*. Then, if an order is borderline, an AI-generated WhatsApp asks the customer to confirm address or payment — turning a risky order into a safe one before shipping.
+**Approach:** AI that predicts *and* intervenes. A LightGBM model catches risky orders + per-order feature explanations so merchants understand *why*. Then, if an order is borderline, an AI-generated WhatsApp asks the customer to confirm address or payment — turning a risky order into a safe one before shipping.
 
 ---
 
@@ -39,19 +40,19 @@
 
 ## The Dataset: Why Synthetic, and What We Learned
 
-We don't have a publicly available **"COD orders rejected at door"** dataset. Razorpay's real transaction data is proprietary. So we built one.
+We don't have a publicly available **"COD orders rejected at door"** dataset. Real transaction data for such instances is proprietary. So built a synthetic one.
 
-**Why not just use Kaggle?** Generic e-commerce datasets (Olist, UK Online Retail) have order history but *no label for doorstep rejection*. You can't train a supervised classifier without a target. We could've guessed labels, but that's pointless — the model would learn nothing.
+**Why not just use Kaggle?** Generic e-commerce datasets (Olist, UK Online Retail) have order history but *no label for doorstep rejection*. You can't train a supervised classifier without a target. Guessing labels would be pointless — the model would learn nothing.
 
-**Our approach:** Generate features realistically (lognormal order values, city-tier weights matching India's e-commerce split, fashion as top rejection category), then build a *causal risk formula* (not random labels). Start with 5% base risk, add risk for each red flag (past rejections +12%, Tier 3 city +10%, high-value COD +25%, poor address +15%), sample final outcome from that probability.
+**Approach:** Generate features realistically (lognormal order values, city-tier weights matching India's e-commerce split, fashion as top rejection category), then build a *causal risk formula* (not random labels). Start with 5% base risk, add risk for each red flag (past rejections +12%, Tier 3 city +10%, high-value COD +25%, poor address +15%), sample final outcome from that probability.
 
-**Key honesty:** This is *synthetic* data, so we report results as "proof of concept on controlled scenarios." Real-world performance would need real merchant data (future work). But the *methodology* — how we detected issues, how we validated the LLM, how we handled the address parsing — all of that transfers.
+**Key honesty:** This is *synthetic* data, so reported the results as "proof of concept on controlled scenarios." Real-world performance would need real merchant data (future work). But the *methodology* — detecting issues, how validating LLM, handling the address parsing — all of that transfers.
 
 ---
 
 ## Model Results: The Honest Comparison
 
-We compared three approaches on the same test set (800 orders):
+Compared three approaches on the same test set (800 orders):
 
 | Approach | Precision | Recall | F1 Score | AUC-ROC |
 |---|---|---|---|---|
@@ -68,20 +69,20 @@ We compared three approaches on the same test set (800 orders):
 ## Key Differentiators: AI Solving the Real Problem (4 Things We Got Right)
 
 ### 1. Address Parsing (Not Magic, Just Rigorous)
-We started with a fake feature: `address_completeness` as a random number 0-100. That's lazy. Real fix: generate synthetic address strings (each component — house number, PIN, landmark — independently present/missing), then parse with *actual regex logic*.
+Started with a fake feature: `address_completeness` as a random number 0-100. That's lazy. Real fix: generate synthetic address strings (each component — house number, PIN, landmark — independently present/missing), then parse with *actual regex logic*.
 
 Why this matters: The model trained on "incomplete addresses *cause delivery failures*" (true fact), not on invisible noise. The model learned order_value matters more than address (511 vs 179 importance score) — realistic, since merchants care most about high-value orders. Address completeness ranks #4, contributing meaningfully but not dominating. When a merchant sees "address_completeness: 45", they know exactly what's missing.
 
 ### 2. Smart Customer Engagement (Experimental)
 Instead of: *"Hi, please confirm your order details"* (generic, awkward)
 
-Our system sends: *"Hi! Just need your PIN code to finalize delivery. Reply with your complete address if possible"* (specific, actionable)
+System sends: *"Hi! Just need your PIN code to finalize delivery. Reply with your complete address if possible"* (specific, actionable)
 
 Deterministic issue detection + Gemini-generated message + one-click `wa.me` link. Merchant doesn't type anything — just clicks to send. This is a UX fix to the "I flagged your order as risky, now what?" problem. Early-stage feature, included to show the *pattern* of AI predicting, explaining, and engaging.
 
 ### 3. Hallucination Safety (Trust But Verify)
 LLMs can invent things. We validate Gemini's explanation against the actual data:
-- **Keyword check:** Did it mention "credit score" or "bank account"? (We never saw those in the input.)
+- **Keyword check:** Did it mention "credit score" or "bank account"? (never saw those in the input.)
 - **Numeric check:** Did it claim "5 past rejections" when the real value is 2?
 
 If caught, we flag for human review. The merchant sees "AI flagged this, but the explanation looks wrong — you decide."
@@ -163,8 +164,8 @@ streamlit run frontend/dashboard.py
 
 ## What This Proves
 
-1. **Razorpay can reduce merchant churn** by catching order risk early *and* helping fix it (not just blocking)
+1. **Financial transaction provider companies can reduce merchant churn** by catching order risk early *and* helping fix it (not just blocking)
 2. **Simple ML + simple AI works better than complex AI alone** — issue detection is deterministic, WhatsApp generation is Gemini, response parsing is regex. Each layer does one thing well.
-3. **Honesty in methodology matters** — synthetic data is fine if you're transparent about it; in-sample threshold optimization is not fine even if the numbers look good.
+
 
 This is a prototype, not production-ready yet. It shows the *pattern*: predict + explain + engage + decide. That pattern scales to real data.

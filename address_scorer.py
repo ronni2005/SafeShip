@@ -1,6 +1,3 @@
-"""
-Shared Address Completeness Scorer
-"""
 import re
 
 
@@ -19,8 +16,7 @@ def score_address_completeness(address_text: str) -> int:
       +10 - landmark present (near/opposite/behind X)
     """
     if not address_text or not address_text.strip():
-        return 20  # empty address — floor score, not zero, since an order can
-                    # still sometimes be delivered on name + phone number alone
+        return 20  # empty address — floor score, not zero, since an order can still sometimes be delivered on name + phone number alone
 
     score = 40
 

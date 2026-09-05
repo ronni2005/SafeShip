@@ -1,6 +1,5 @@
 """
 LLM Explainer Layer + Dynamic Enrichment
-========================================
 Handles fast, resilient merchant explanations, correct risk scoring thresholds,
 and WhatsApp action links.
 """

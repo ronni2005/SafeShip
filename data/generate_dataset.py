@@ -11,8 +11,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from address_scorer import score_address_completeness
 
-np.random.seed(42)  # reproducibility — same data every time we run this
-
+np.random.seed(42)  
 N = 4000
 
 # STEP 1: Generate raw feature columns
@@ -70,7 +69,7 @@ def build_address(has_house_no, has_street, has_landmark, has_pin, city):
 
 
 has_house_no = np.random.choice([0, 1], size=N, p=[0.15, 0.85])
-has_street = np.ones(N, dtype=int)  # street name always attempted, matches build_address()
+has_street = np.ones(N, dtype=int) 
 has_landmark = np.random.choice([0, 1], size=N, p=[0.55, 0.45])
 has_pin = np.random.choice([0, 1], size=N, p=[0.25, 0.75])
 address_city = np.random.choice(CITIES, size=N)
@@ -82,7 +81,6 @@ address_text = [
 address_completeness = np.array([score_address_completeness(a) for a in address_text])
 
 # STEP 2: Build reject probability using real-world logic
-# start with a small base risk, then ADD risk for each red flag.
 
 risk_score = np.full(N, 0.03)  # base 5% reject chance for everyone
 
